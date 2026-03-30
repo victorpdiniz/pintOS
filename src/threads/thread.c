@@ -4,6 +4,7 @@
 #include <random.h>
 #include <stdio.h>
 #include <string.h>
+#include "devices/timer.h"
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
@@ -23,6 +24,9 @@
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
+
+/* List of processes in SLEEP state.*/
+static struct list sleeping_list;
 
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
@@ -70,6 +74,7 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+bool cmp_wakeup_tick(const struct list_elem *a, const struct list_elem *b, void *aux);
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -91,6 +96,7 @@ thread_init (void)
 
   lock_init (&tid_lock);
   list_init (&ready_list);
+  list_init (&sleeping_list);
   list_init (&all_list);
 
   /* Set up a thread structure for the running thread. */
@@ -314,6 +320,73 @@ thread_yield (void)
   intr_set_level (old_level);
 }
 
+/* Compares two priorities a and b and returns the bigger. */
+bool
+cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux)
+{
+  int priority_a = list_entry (a, struct thread, elem)->priority;
+  int priority_b = list_entry (b, struct thread, elem)->priority;
+
+  return priority_a >= priority_b;
+}
+
+/* Compares two wake_up ticks a and b and returns true if 
+   a < b.*/
+bool
+cmp_wakeup_tick (const struct list_elem *a, const struct list_elem *b, void *aux)
+{
+  int64_t wakeup_tick_a = list_entry(a, struct thread, elem)->wakeup_tick;
+  int64_t wakeup_tick_b = list_entry(b, struct thread, elem)->wakeup_tick;
+  
+  return wakeup_tick_a < wakeup_tick_b;
+}
+
+/* Thread sleep function. */
+void
+thread_sleep (int64_t wakeup_tick)
+{
+  struct thread *cur = thread_current ();
+  enum intr_level old_level;
+  ASSERT (!intr_context ());
+
+  old_level = intr_disable ();
+  if (cur != idle_thread)
+  {
+    cur->wakeup_tick = wakeup_tick;
+    list_insert_ordered(&sleeping_list, &cur->elem, cmp_wakeup_tick, NULL);
+  }
+  cur->status = THREAD_BLOCKED;
+  schedule ();
+  intr_set_level (old_level);
+}
+
+/* Thread wakeup function. */
+void
+thread_wakeup (void)
+{
+  struct list_elem *e = list_begin (&sleeping_list);
+  enum intr_level old_level;
+  
+  old_level = intr_disable ();
+  
+  while (e != list_end (&sleeping_list))
+  {
+    struct thread *t = list_entry (e, struct thread, elem);
+    e = list_next (e);
+    
+    if (t->wakeup_tick <= timer_ticks ())
+    {
+      list_remove (&t->elem);
+      list_insert_ordered (&ready_list, &t->elem, cmp_priority, NULL);
+      t->status = THREAD_READY;
+      // printf("Waking thread %d with priority %d.\n", t->tid, t->priority);
+    }
+    else
+      break;
+  }
+  intr_set_level (old_level);
+}
+
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -462,6 +535,7 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->wakeup_tick = 0;
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
