@@ -206,6 +206,10 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
+  
+  /* Compare the priorities of the currently running thread and the newly inserted one. Yield the CPU if the newly arriving thread has higher priority. */
+  if (priority > thread_get_priority ())
+    thread_yield();
 
   return tid;
 }
@@ -243,7 +247,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered(&ready_list, &t->elem, cmp_priority, NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -314,7 +318,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered (&ready_list, &cur->elem, cmp_priority, NULL);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -387,6 +391,17 @@ thread_wakeup (void)
   intr_set_level (old_level);
 }
 
+/* Checks if the current thread's priority is lower than the maximum
+   priority of the threads in the ready list. If so, it yields the CPU
+   to a higher priority thread. */
+void
+thread_preempt (void)
+{
+  int max_priority = list_entry (list_begin (&ready_list), struct thread, elem)->priority;
+  
+  if (thread_get_priority () < max_priority)
+    thread_yield ();
+}
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -409,6 +424,7 @@ void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+  thread_preempt ();
 }
 
 /* Returns the current thread's priority. */

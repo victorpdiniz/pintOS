@@ -126,10 +126,11 @@ const char *thread_name (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
-bool cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux);
-bool cmp_wakeup_tick (const struct list_elem *a, const struct list_elem *b, void *aux);
+bool cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
+bool cmp_wakeup_tick (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
 void thread_sleep (int64_t ticks);
 void thread_wakeup (void);
+void thread_preempt (void);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func (struct thread *t, void *aux);
