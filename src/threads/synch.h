@@ -22,6 +22,8 @@ struct lock
   {
     struct thread *holder;      /* Thread holding lock (for debugging). */
     struct semaphore semaphore; /* Binary semaphore controlling access. */
+    struct list_elem elem;      /* List element. */
+    int priority;               /* Maximum priority of the threads waiting for this lock. */
   };
 
 void lock_init (struct lock *);
@@ -45,7 +47,13 @@ void cond_broadcast (struct condition *, struct lock *);
 
    The compiler will not reorder operations across an
    optimization barrier.  See "Optimization Barriers" in the
-   reference guide for more information.*/
+   reference guide for more information. */
 #define barrier() asm volatile ("" : : : "memory")
+
+/* Comparator for list of semaphores. */
+bool cmp_semaphore (const struct list_elem *a, const struct list_elem *b, void *aux);
+
+/* Comparator for list of locks. */
+bool cmp_lock (const struct list_elem *a, const struct list_elem *b, void *aux);
 
 #endif /* threads/synch.h */
