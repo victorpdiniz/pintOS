@@ -377,7 +377,7 @@ thread_wakeup (void)
     if (t->wakeup_tick <= timer_ticks ())
     {
       list_remove (&t->elem);
-      list_insert_ordered (&ready_list, &t->elem, cmp_priority, NULL);
+      list_insert_ordered (&ready_list, &t->elem, cmp_wakeup_tick, NULL);
       t->status = THREAD_READY;
       // printf("Waking thread %d with priority %d.\n", t->tid, t->priority);
     }
