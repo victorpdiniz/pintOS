@@ -17,6 +17,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -38,8 +39,17 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* Extract the thread name (the first word of the command line) */
+  char *thread_name = palloc_get_page (0);
+  strlcpy (thread_name, file_name, PGSIZE);
+  char *save_ptr;
+  strtok_r (thread_name, " ", &save_ptr); // Extracts the first word
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (thread_name, PRI_DEFAULT, start_process, fn_copy);
+  
+  palloc_free_page (thread_name); // Free the temporary name buffer
+  
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
   return tid;
@@ -54,17 +64,80 @@ start_process (void *file_name_)
   struct intr_frame if_;
   bool success;
 
-  /* Initialize interrupt frame and load executable. */
+  /* 1. Parse the executable name out of the string BEFORE load() */
+  char *save_ptr;
+  char *executable_name = strtok_r (file_name, " ", &save_ptr);
+
+  /* 2. Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
-  if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  if_.eflags = FLAG_IF;
+
+  /* PASS ONLY executable_name HERE */
+  success = load (executable_name, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  if (!success) {
+    palloc_free_page (file_name);
     thread_exit ();
+  }
+
+  /* 3. If load succeeded, parse the REST of the arguments and build the stack */
+  int argc = 0;
+  char *argv[64];
+  argv[argc++] = executable_name;
+
+  char *token;
+  while ((token = strtok_r (NULL, " ", &save_ptr)) != NULL) {
+    argv[argc++] = token;
+  }
+
+  /* Grab the stack pointer from the interrupt frame */
+  void *esp = if_.esp;
+  uint32_t argv_addresses[128];
+
+  /* 2. Push the strings onto the stack (Right to Left) */
+  for (int i = argc - 1; i >= 0; i--) 
+  {
+    size_t len = strlen(argv[i]) + 1;   // +1 for the null terminator
+    esp -= len;                         // Move the stack pointer down
+    memcpy(esp, argv[i], len);          // Write the string into memory
+    argv_addresses[i] = (uint32_t) esp; // Save the address for later
+  }
+
+  /* 3. Word-align the stack pointer (Round down to multiple of 4) */
+  esp = (void *)((uint32_t)esp & ~3);
+
+  /* 4. Push the null sentinel (argv[argc] = NULL) */
+  esp -= 4;
+  *(uint32_t *)esp = 0;
+
+  /* 5. Push the pointers to the strings (Right to Left) */
+  for (int i = argc - 1; i >= 0; i--) 
+  {
+    esp -= 4;
+    *(uint32_t *)esp = argv_addresses[i];
+  }
+
+  /* 6. Push the address of argv (pointer to the first element of the pointers array) */
+  uint32_t argv_start = (uint32_t)esp;
+  esp -= 4;
+  *(uint32_t *)esp = argv_start;
+
+  /* 7. Push argc */
+  esp -= 4;
+  *(int *)esp = argc;
+
+  /* 8. Push a fake return address */
+  esp -= 4;
+  *(uint32_t *)esp = 0;
+
+  /* 9. Save the modified stack pointer back into the interrupt frame */
+  if_.esp = esp;
+
+  // hex_dump((uintptr_t)if_.esp, if_.esp, (size_t)((uintptr_t)PHYS_BASE - (uintptr_t)if_.esp), true);  
+  palloc_free_page (file_name);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -88,6 +161,10 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
+  /* Temporary hack: sleep for a long time to let the child finish.
+     This will stop the 'lag' and let the tests time out naturally 
+     or move to the next step. */
+  timer_sleep(100); 
   return -1;
 }
 
