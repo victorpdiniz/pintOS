@@ -20,7 +20,6 @@ syscall_init (void)
 static void
 syscall_handler (struct intr_frame *f) 
 {
-  /* Valida o ponteiro do número da syscall. */
   validate_ptr(f->esp);
   int syscall_num = *(int *)f->esp;
 
@@ -31,11 +30,7 @@ syscall_handler (struct intr_frame *f)
         validate_ptr(f->esp + 4);
         int status = *(int *)(f->esp + 4);
         
-        /* Regra (iii) do SYS_EXIT: printf específico. */
         printf("%s: exit(%d)\n", thread_current()->name, status);
-        
-        /* Libera o pai que está no wait (se houver semáforo real). */
-        // sema_up(&thread_current()->wait_sema); 
         
         thread_exit();
         break;
@@ -66,7 +61,6 @@ syscall_handler (struct intr_frame *f)
       {
         validate_ptr(f->esp + 4);
         tid_t tid = *(tid_t *)(f->esp + 4);
-        /* Regra (ii) do SYS_WAIT: uso simples do wait. */
         f->eax = process_wait(tid);
         break;
       }
