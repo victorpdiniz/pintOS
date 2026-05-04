@@ -32,26 +32,31 @@ process_execute (const char *file_name)
   char *fn_copy;
   tid_t tid;
 
-  /* Make a copy of FILE_NAME.
-     Otherwise there's a race between the caller and load(). */
+  /* Make a copy of FILE_NAME to avoid race conditions. */
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Extract the thread name (the first word of the command line) */
+  /* Extract the thread name (the first word of the command line). */
   char *thread_name = palloc_get_page (0);
+  if (thread_name == NULL) {
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
   strlcpy (thread_name, file_name, PGSIZE);
-  char *save_ptr;
-  strtok_r (thread_name, " ", &save_ptr); // Extracts the first word
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (thread_name, PRI_DEFAULT, start_process, fn_copy);
+  char *save_ptr;
+  char *real_name = strtok_r (thread_name, " ", &save_ptr);
+
+  /* Create a new thread. Pass the copy of the full command line as 'aux'. */
+  tid = thread_create (real_name, PRI_DEFAULT, start_process, fn_copy);
   
-  palloc_free_page (thread_name); // Free the temporary name buffer
+  palloc_free_page (thread_name);
   
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+
   return tid;
 }
 
@@ -64,87 +69,89 @@ start_process (void *file_name_)
   struct intr_frame if_;
   bool success;
 
-  /* 1. Parse the executable name out of the string BEFORE load() */
-  char *save_ptr;
-  char *executable_name = strtok_r (file_name, " ", &save_ptr);
+  /* 1. Pre-parse to count the number of arguments (argc) */
+  char *fn_copy = palloc_get_page(0);
+  if (fn_copy == NULL)
+    thread_exit();
+  strlcpy(fn_copy, file_name, PGSIZE);
 
-  /* 2. Initialize interrupt frame and load executable. */
+  int argc = 0;
+  char *token, *save_ptr;
+  for (token = strtok_r(fn_copy, " ", &save_ptr); token != NULL;
+       token = strtok_r(NULL, " ", &save_ptr))
+    argc++;
+
+  /* 2. Now define the array with the exact size needed */
+  char *argv[argc]; 
+  uint32_t argv_addresses[argc];
+
+  /* 3. Re-tokenize the original string to fill our argv array */
+  /* We extract the executable name first for the loader */
+  char *executable_name = strtok_r(file_name, " ", &save_ptr);
+  argv[0] = executable_name;
+
+  for (int i = 1; i < argc; i++)
+    argv[i] = strtok_r(NULL, " ", &save_ptr);
+
+  /* 4. Initialize interrupt frame and load the executable */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
-  if_.eflags = FLAG_IF;
+  if_.eflags = FLAG_IF | FLAG_MBS;
 
-  /* PASS ONLY executable_name HERE */
   success = load (executable_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
+  /* If load failed, clean up and quit */
   if (!success) {
+    palloc_free_page (fn_copy);
     palloc_free_page (file_name);
     thread_exit ();
   }
 
-  /* 3. If load succeeded, parse the REST of the arguments and build the stack */
-  int argc = 0;
-  char *argv[64];
-  argv[argc++] = executable_name;
+  /* 5. Build the user stack using the 80x86 calling convention */
+  void *esp = if_.esp; /* Initialized to PHYS_BASE by setup_stack */
 
-  char *token;
-  while ((token = strtok_r (NULL, " ", &save_ptr)) != NULL) {
-    argv[argc++] = token;
+  /* A. Push string data (Right to Left) */
+  for (int i = argc - 1; i >= 0; i--) {
+    size_t len = strlen(argv[i]) + 1;
+    esp -= len;
+    memcpy(esp, argv[i], len);
+    argv_addresses[i] = (uint32_t) esp;
   }
 
-  /* Grab the stack pointer from the interrupt frame */
-  void *esp = if_.esp;
-  uint32_t argv_addresses[128];
-
-  /* 2. Push the strings onto the stack (Right to Left) */
-  for (int i = argc - 1; i >= 0; i--) 
-  {
-    size_t len = strlen(argv[i]) + 1;   // +1 for the null terminator
-    esp -= len;                         // Move the stack pointer down
-    memcpy(esp, argv[i], len);          // Write the string into memory
-    argv_addresses[i] = (uint32_t) esp; // Save the address for later
-  }
-
-  /* 3. Word-align the stack pointer (Round down to multiple of 4) */
+  /* B. Word Alignment (Round down to multiple of 4) */
   esp = (void *)((uint32_t)esp & ~3);
 
-  /* 4. Push the null sentinel (argv[argc] = NULL) */
+  /* C. Push Null Sentinel for argv[argc] */
   esp -= 4;
   *(uint32_t *)esp = 0;
 
-  /* 5. Push the pointers to the strings (Right to Left) */
-  for (int i = argc - 1; i >= 0; i--) 
-  {
+  /* D. Push Addresses of strings (Right to Left) */
+  for (int i = argc - 1; i >= 0; i--) {
     esp -= 4;
     *(uint32_t *)esp = argv_addresses[i];
   }
 
-  /* 6. Push the address of argv (pointer to the first element of the pointers array) */
-  uint32_t argv_start = (uint32_t)esp;
+  /* E. Push argv (pointer to argv[0]) */
+  uint32_t argv_ptr = (uint32_t)esp;
   esp -= 4;
-  *(uint32_t *)esp = argv_start;
+  *(uint32_t *)esp = argv_ptr;
 
-  /* 7. Push argc */
+  /* F. Push argc */
   esp -= 4;
   *(int *)esp = argc;
 
-  /* 8. Push a fake return address */
+  /* G. Push fake return address */
   esp -= 4;
   *(uint32_t *)esp = 0;
 
-  /* 9. Save the modified stack pointer back into the interrupt frame */
+  /* 6. Set the final stack pointer and clean up */
   if_.esp = esp;
-
-  // hex_dump((uintptr_t)if_.esp, if_.esp, (size_t)((uintptr_t)PHYS_BASE - (uintptr_t)if_.esp), true);  
+  
+  palloc_free_page (fn_copy);
   palloc_free_page (file_name);
 
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
+  /* Start the user process */
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
 }
@@ -514,7 +521,7 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE - 12;
+        *esp = PHYS_BASE;
       else
         palloc_free_page (kpage);
     }

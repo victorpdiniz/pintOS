@@ -7,9 +7,12 @@
 #include "userprog/pagedir.h"
 #include "devices/shutdown.h"
 #include "lib/kernel/stdio.h"
+#include "userprog/process.h"
 
 static void syscall_handler (struct intr_frame *);
-static void validate_ptr (const void *vaddr);
+static void exit_with_status (int status);
+static int memread_user (const void *src, void *dst, size_t bytes);
+static int32_t get_user (const uint8_t *uaddr);
 
 void
 syscall_init (void) 
@@ -20,64 +23,107 @@ syscall_init (void)
 static void
 syscall_handler (struct intr_frame *f) 
 {
-  validate_ptr(f->esp);
-  int syscall_num = *(int *)f->esp;
+  int syscall_num;
+
+  /* Safely read the syscall number from the user stack. */
+  if (memread_user (f->esp, &syscall_num, sizeof (syscall_num)) == -1)
+    exit_with_status (-1);
 
   switch (syscall_num) 
   {
+    case SYS_HALT:
+      shutdown_power_off (); /* */
+      break;
+
     case SYS_EXIT:
       {
-        validate_ptr(f->esp + 4);
-        int status = *(int *)(f->esp + 4);
-        
-        printf("%s: exit(%d)\n", thread_current()->name, status);
-        
-        thread_exit();
-        break;
-      }
-
-    case SYS_WRITE:
-      {
-        /* Valida argumentos. */
-        validate_ptr(f->esp + 4); // fd
-        validate_ptr(f->esp + 8); // buffer
-        validate_ptr(f->esp + 12); // size
-
-        int fd = *(int *)(f->esp + 4);
-        const void *buffer = *(char **)(f->esp + 8);
-        unsigned size = *(unsigned *)(f->esp + 12);
-
-        validate_ptr(buffer);
-
-        if (fd == 1) /* STDOUT */
-          {
-            putbuf(buffer, size);
-            f->eax = size;
-          }
+        int status;
+        if (memread_user (f->esp + 4, &status, sizeof (status)) == -1)
+          exit_with_status (-1);
+        exit_with_status (status);
         break;
       }
 
     case SYS_WAIT:
       {
-        validate_ptr(f->esp + 4);
-        tid_t tid = *(tid_t *)(f->esp + 4);
-        f->eax = process_wait(tid);
+        tid_t tid;
+        if (memread_user (f->esp + 4, &tid, sizeof (tid)) == -1)
+          exit_with_status (-1);
+        f->eax = process_wait (tid); /* */
+        break;
+      }
+
+    case SYS_WRITE:
+      {
+        int fd;
+        const void *buffer;
+        unsigned size;
+
+        /* Extract arguments from stack. */
+        if (memread_user (f->esp + 4, &fd, sizeof (fd)) == -1 ||
+            memread_user (f->esp + 8, &buffer, sizeof (buffer)) == -1 ||
+            memread_user (f->esp + 12, &size, sizeof (size)) == -1)
+          exit_with_status (-1);
+
+        /* Validate the entire buffer range before using putbuf. */
+        for (unsigned i = 0; i < size; i++)
+          {
+            if (get_user ((const uint8_t *)buffer + i) == -1)
+              exit_with_status (-1);
+          }
+
+        if (fd == 1) /* STDOUT_FILENO */
+          {
+            putbuf (buffer, size);
+            f->eax = size;
+          }
+        else
+          f->eax = 0;
         break;
       }
 
     default:
-      thread_exit();
+      exit_with_status (-1);
   }
 }
 
-/* Validação conforme as orientações de endereços válidos. */
+/* Helper to handle process termination and print the required message. */
 static void
-validate_ptr (const void *vaddr) 
+exit_with_status (int status)
 {
-  if (!vaddr || !is_user_vaddr(vaddr) || pagedir_get_page(thread_current()->pagedir, vaddr) == NULL)
+  printf ("%s: exit(%d)\n", thread_current ()->name, status);
+  thread_exit ();
+}
+
+/****************** Robust Memory Access Helpers ********************/
+
+/* Reads a single byte from user address uaddr.
+   Returns the byte value or -1 if a segfault occurred. */
+static int32_t
+get_user (const uint8_t *uaddr) 
+{
+  if (!is_user_vaddr (uaddr)) /* Ensure address is below PHYS_BASE. */
+    return -1;
+
+  int result;
+  /* Inline assembly to catch page faults in the kernel. */
+  asm ("movl $1f, %0; movzbl %1, %0; 1:"
+       : "=&a" (result) : "m" (*uaddr));
+  return result;
+}
+
+/* Safely reads 'bytes' from user memory starting at 'src' into 'dst'.
+   Returns 'bytes' if successful, or -1 on error. */
+static int
+memread_user (const void *src, void *dst, size_t bytes)
+{
+  int32_t value;
+  for (size_t i = 0; i < bytes; i++) 
     {
-      /* Se acesso inválido, termina o processo conforme regras. */
-      printf("%s: exit(-1)\n", thread_current()->name);
-      thread_exit();
+      value = get_user ((const uint8_t *)src + i);
+      if (value == -1) 
+        return -1;
+      *(uint8_t *)(dst + i) = value & 0xff;
     }
+  return (int)bytes;
 }
