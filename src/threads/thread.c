@@ -537,6 +537,9 @@ init_thread (struct thread *t, const char *name, int priority)
   t->priority = priority;
   t->wakeup_tick = 0;
   t->magic = THREAD_MAGIC;
+#ifdef USERPROG
+  list_init (&t->children);
+#endif
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
