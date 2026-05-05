@@ -4,6 +4,11 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
+
+#define MAX_FDS 128
+
+struct file;  /* forward declaration to avoid including filesys/file.h */
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -18,6 +23,20 @@ enum thread_status
    You can redefine this to whatever type you like. */
 typedef int tid_t;
 #define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
+
+#ifdef USERPROG
+struct child_process
+  {
+    tid_t tid;
+    int exit_status;
+    bool waited;
+    bool load_success;
+    int ref_count;              /* 2 = both parent and child alive */
+    struct semaphore sema;      /* signaled when child exits */
+    struct semaphore load_sema; /* signaled when child finishes loading */
+    struct list_elem elem;
+  };
+#endif
 
 /* Thread priorities. */
 #define PRI_MIN 0                       /* Lowest priority. */
@@ -97,6 +116,11 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    int exit_status;                    /* Exit status for process_wait. */
+    struct file *fd_table[MAX_FDS];     /* File descriptor table (2..MAX_FDS-1). */
+    struct list children;               /* List of child_process entries. */
+    struct child_process *cp;           /* Parent's child_process entry for this thread. */
+    struct file *executable;            /* Executable file (kept open to deny writes). */
 #endif
 
     /* Owned by thread.c. */
