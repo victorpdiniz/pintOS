@@ -22,40 +22,44 @@
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
-/* Starts a new thread running a user program loaded from
-   FILENAME.  The new thread may be scheduled (and may even exit)
-   before process_execute() returns.  Returns the new process's
+/* Starts a new thread running a user program loaded from CMD_LINE.
+   The new thread may be scheduled (and may even exit)
+   before process_execute() returns. Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *cmd_line)
 {
-  char *fn_copy;
+  char *cmd_copy, *thread_name;
+  char *save_ptr;
   tid_t tid;
 
-  /* Make a copy of FILE_NAME to avoid race conditions. */
-  fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
+  /* Make a copy of CMD_LINE. */
+  cmd_copy = palloc_get_page (0);
+  if (cmd_copy == NULL) 
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (cmd_copy, cmd_line, PGSIZE);
 
-  /* Extract the thread name (the first word of the command line). */
-  char *thread_name = palloc_get_page (0);
-  if (thread_name == NULL) {
-    palloc_free_page(fn_copy);
-    return TID_ERROR;
-  }
-  strlcpy (thread_name, file_name, PGSIZE);
+  /* Create a second temporary copy to extract the thread name. */
+  thread_name = palloc_get_page (0);
+  if (thread_name == NULL) 
+    {
+      palloc_free_page (cmd_copy);
+      return TID_ERROR;
+    }
+  strlcpy (thread_name, cmd_line, PGSIZE);
 
-  char *save_ptr;
-  char *real_name = strtok_r (thread_name, " ", &save_ptr);
+  /* Extract the first word (the executable name). */
+  char *file_name = strtok_r (thread_name, " ", &save_ptr);
 
-  /* Create a new thread. Pass the copy of the full command line as 'aux'. */
-  tid = thread_create (real_name, PRI_DEFAULT, start_process, fn_copy);
-  
+  /* Create a new thread to execute the program. */
+  tid = thread_create (file_name, PRI_DEFAULT, start_process, cmd_copy);
+
+  /* Clean up temporary memory. */
   palloc_free_page (thread_name);
-  
+
+  /* If thread creation failed, free the command line copy to avoid leaks. */
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    palloc_free_page (cmd_copy);
 
   return tid;
 }
