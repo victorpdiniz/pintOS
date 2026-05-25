@@ -18,6 +18,10 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#ifdef VM
+#include "vm/frame.h"
+#include "vm/page.h"
+#endif
 
 extern struct lock filesys_lock;
 
@@ -107,12 +111,22 @@ process_execute (const char *cmd_line)
 static void
 start_process (void *args_)
 {
+  struct thread *cur = thread_current ();
+
+#ifdef VM
+  /* Initialize VM state before any possible thread_exit(). */
+  spt_init (&cur->spage_table);
+  list_init (&cur->mmap_list);
+  cur->next_mapid   = 1;
+  cur->esp_saved    = NULL;
+  cur->spt_initialized = true;
+#endif
+
   struct start_args *args = args_;
   char *file_name = args->cmd_line;
   struct child_process *cp = args->cp;
   free (args);
 
-  struct thread *cur = thread_current ();
   cur->cp = cp;
 
   struct intr_frame if_;
@@ -261,6 +275,15 @@ process_exit (void)
       cur->executable = NULL;
     }
   lock_release (&filesys_lock);
+
+#ifdef VM
+  if (cur->spt_initialized)
+    {
+      /* Write back all dirty mmap pages, then tear down the SPT. */
+      munmap_all (cur);
+      spt_destroy (&cur->spage_table);
+    }
+#endif
 
   /* Signal parent that this process has exited. */
   if (cur->cp != NULL)
@@ -497,6 +520,43 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   ASSERT (pg_ofs (upage) == 0);
   ASSERT (ofs % PGSIZE == 0);
 
+#ifdef VM
+  off_t file_offset = ofs;
+  while (read_bytes > 0 || zero_bytes > 0)
+    {
+      size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
+      size_t page_zero_bytes = PGSIZE - page_read_bytes;
+
+      struct sup_page_entry *spte = malloc (sizeof *spte);
+      if (spte == NULL)
+        return false;
+
+      spte->upage       = upage;
+      spte->location    = (page_read_bytes == 0) ? PAGE_ZERO : PAGE_FILE;
+      spte->writable    = writable;
+      spte->dirty       = false;
+      spte->is_mmap     = false;
+      spte->mapid       = -1;
+      spte->file        = file;
+      spte->file_offset = file_offset;
+      spte->read_bytes  = page_read_bytes;
+      spte->zero_bytes  = page_zero_bytes;
+      spte->swap_sector = 0;
+      spte->kpage       = NULL;
+
+      if (!spt_insert (&thread_current ()->spage_table, spte))
+        {
+          free (spte);
+          return false;
+        }
+
+      read_bytes  -= page_read_bytes;
+      zero_bytes  -= page_zero_bytes;
+      upage       += PGSIZE;
+      file_offset += page_read_bytes;
+    }
+  return true;
+#else
   file_seek (file, ofs);
   while (read_bytes > 0 || zero_bytes > 0)
     {
@@ -525,11 +585,44 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       upage += PGSIZE;
     }
   return true;
+#endif
 }
 
 static bool
 setup_stack (void **esp)
 {
+#ifdef VM
+  void *upage = ((uint8_t *) PHYS_BASE) - PGSIZE;
+
+  struct sup_page_entry *spte = malloc (sizeof *spte);
+  if (spte == NULL)
+    return false;
+
+  spte->upage       = upage;
+  spte->location    = PAGE_ZERO;
+  spte->writable    = true;
+  spte->dirty       = false;
+  spte->is_mmap     = false;
+  spte->mapid       = -1;
+  spte->file        = NULL;
+  spte->file_offset = 0;
+  spte->read_bytes  = 0;
+  spte->zero_bytes  = PGSIZE;
+  spte->swap_sector = 0;
+  spte->kpage       = NULL;
+
+  if (!spt_insert (&thread_current ()->spage_table, spte))
+    {
+      free (spte);
+      return false;
+    }
+
+  if (!spt_load_page (spte))
+    return false;
+
+  *esp = PHYS_BASE;
+  return true;
+#else
   uint8_t *kpage;
   bool success = false;
 
@@ -543,6 +636,7 @@ setup_stack (void **esp)
         palloc_free_page (kpage);
     }
   return success;
+#endif
 }
 
 static bool

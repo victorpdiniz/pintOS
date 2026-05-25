@@ -5,6 +5,9 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/synch.h"
+#ifdef VM
+#include <hash.h>
+#endif
 
 #define MAX_FDS 128
 
@@ -121,6 +124,14 @@ struct thread
     struct list children;               /* List of child_process entries. */
     struct child_process *cp;           /* Parent's child_process entry for this thread. */
     struct file *executable;            /* Executable file (kept open to deny writes). */
+#endif
+
+#ifdef VM
+    bool spt_initialized;               /* True after spt_init() called in start_process. */
+    struct hash spage_table;            /* Supplemental page table (hash, keyed by upage). */
+    struct list mmap_list;              /* Active mmap regions. */
+    int next_mapid;                     /* Next mmap ID to assign. */
+    void *esp_saved;                    /* User ESP saved at syscall entry. */
 #endif
 
     /* Owned by thread.c. */
