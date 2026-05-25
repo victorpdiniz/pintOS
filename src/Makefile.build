@@ -62,7 +62,10 @@ userprog_SRC += userprog/gdt.c		# GDT initialization.
 userprog_SRC += userprog/tss.c		# TSS management.
 
 # Virtual memory code.
-#vm_SRC = vm/frame.c	
+vm_SRC  = vm/frame.c
+vm_SRC += vm/page.c
+vm_SRC += vm/swap.c
+
 # Filesystem code.
 filesys_SRC  = filesys/filesys.c	# Filesystem core.
 filesys_SRC += filesys/free-map.c	# Free sector bitmap.
@@ -88,7 +91,9 @@ threads/loader.o: threads/loader.S
 	$(CC) -c $< -o $@ $(ASFLAGS) $(CPPFLAGS) $(DEFINES)
 
 loader.bin: threads/loader.o
-	$(LD) -N -e 0 -Ttext 0x7c00 --oformat binary -o $@ $<
+	$(OBJCOPY) --remove-section=.note.gnu.property $< threads/loader_stripped.o
+	$(LD) -N -e 0 -Ttext 0x7c00 --oformat binary -o $@ threads/loader_stripped.o
+	rm -f threads/loader_stripped.o
 
 os.dsk: kernel.bin
 	cat $^ > $@
