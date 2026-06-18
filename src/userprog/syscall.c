@@ -12,6 +12,9 @@
 #include "devices/shutdown.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/directory.h"
+#include "filesys/inode.h"
+#include "filesys/off_t.h"
 #include "lib/kernel/stdio.h"
 #ifdef VM
 #include "vm/page.h"
@@ -130,10 +133,10 @@ syscall_handler (struct intr_frame *f)
         validate_string (filename);
 
         lock_acquire (&filesys_lock);
-        struct file *opened = filesys_open (filename);
+        struct inode *opened_inode = filesys_open_inode (filename);
         lock_release (&filesys_lock);
 
-        if (opened == NULL)
+        if (opened_inode == NULL)
           {
             f->eax = -1;
             break;
@@ -143,19 +146,51 @@ syscall_handler (struct intr_frame *f)
         int fd = -1;
         for (int i = 2; i < MAX_FDS; i++)
           {
+#ifdef FILESYS
+            if (cur->fd_table[i] == NULL && cur->dir_table[i] == NULL)
+#else
             if (cur->fd_table[i] == NULL)
+#endif
               {
-                cur->fd_table[i] = opened;
                 fd = i;
                 break;
               }
           }
+
         if (fd == -1)
           {
-            lock_acquire (&filesys_lock);
-            file_close (opened);
-            lock_release (&filesys_lock);
+            inode_close (opened_inode);
+            f->eax = -1;
+            break;
           }
+
+#ifdef FILESYS
+        if (inode_is_dir (opened_inode))
+          {
+            cur->dir_table[fd] = dir_open (opened_inode);
+            if (cur->dir_table[fd] == NULL)
+              {
+                f->eax = -1;
+                break;
+              }
+          }
+        else
+          {
+            cur->fd_table[fd] = file_open (opened_inode);
+            if (cur->fd_table[fd] == NULL)
+              {
+                f->eax = -1;
+                break;
+              }
+          }
+#else
+        cur->fd_table[fd] = file_open (opened_inode);
+        if (cur->fd_table[fd] == NULL)
+          {
+            f->eax = -1;
+            break;
+          }
+#endif
         f->eax = fd;
         break;
       }
@@ -280,13 +315,29 @@ syscall_handler (struct intr_frame *f)
         int fd;
         if (memread_user (f->esp + 4, &fd, sizeof (fd)) == -1)
           exit_with_status (-1);
-        struct file *file = get_file_from_fd (fd);
-        if (file == NULL)
+        if (fd < 2 || fd >= MAX_FDS)
           exit_with_status (-1);
+        struct thread *cur = thread_current ();
         lock_acquire (&filesys_lock);
-        file_close (file);
+#ifdef FILESYS
+        if (cur->dir_table[fd] != NULL)
+          {
+            dir_close (cur->dir_table[fd]);
+            cur->dir_table[fd] = NULL;
+          }
+        else
+#endif
+        if (cur->fd_table[fd] != NULL)
+          {
+            file_close (cur->fd_table[fd]);
+            cur->fd_table[fd] = NULL;
+          }
+        else
+          {
+            lock_release (&filesys_lock);
+            exit_with_status (-1);
+          }
         lock_release (&filesys_lock);
-        thread_current ()->fd_table[fd] = NULL;
         break;
       }
 
@@ -311,6 +362,87 @@ syscall_handler (struct intr_frame *f)
         break;
       }
 #endif
+
+#ifdef FILESYS
+    case SYS_CHDIR:
+      {
+        const char *path;
+        if (memread_user (f->esp + 4, &path, sizeof (path)) == -1)
+          exit_with_status (-1);
+        if (path == NULL)
+          { f->eax = 0; break; }
+        validate_string (path);
+        lock_acquire (&filesys_lock);
+        bool ok = filesys_chdir (path);
+        lock_release (&filesys_lock);
+        f->eax = ok;
+        break;
+      }
+
+    case SYS_MKDIR:
+      {
+        const char *path;
+        if (memread_user (f->esp + 4, &path, sizeof (path)) == -1)
+          exit_with_status (-1);
+        if (path == NULL || *path == '\0')
+          { f->eax = 0; break; }
+        validate_string (path);
+        lock_acquire (&filesys_lock);
+        bool ok = filesys_mkdir (path);
+        lock_release (&filesys_lock);
+        f->eax = ok;
+        break;
+      }
+
+    case SYS_READDIR:
+      {
+        int fd;
+        char *buf;
+        if (memread_user (f->esp + 4, &fd, sizeof (fd)) == -1 ||
+            memread_user (f->esp + 8, &buf, sizeof (buf)) == -1)
+          exit_with_status (-1);
+        validate_buffer (buf, NAME_MAX + 1, true);
+        struct dir *dir = get_dir_from_fd (fd);
+        if (dir == NULL)
+          { f->eax = 0; break; }
+        lock_acquire (&filesys_lock);
+        char name[NAME_MAX + 1];
+        bool ok = dir_readdir (dir, name);
+        lock_release (&filesys_lock);
+        if (ok)
+          memcpy (buf, name, NAME_MAX + 1);
+        f->eax = ok;
+        break;
+      }
+
+    case SYS_ISDIR:
+      {
+        int fd;
+        if (memread_user (f->esp + 4, &fd, sizeof (fd)) == -1)
+          exit_with_status (-1);
+        if (fd < 2 || fd >= MAX_FDS)
+          { f->eax = 0; break; }
+        f->eax = (thread_current ()->dir_table[fd] != NULL);
+        break;
+      }
+
+    case SYS_INUMBER:
+      {
+        int fd;
+        if (memread_user (f->esp + 4, &fd, sizeof (fd)) == -1)
+          exit_with_status (-1);
+        if (fd < 2 || fd >= MAX_FDS)
+          { f->eax = -1; break; }
+        struct thread *cur = thread_current ();
+        if (cur->dir_table[fd] != NULL)
+          f->eax = (int) inode_get_inumber (dir_get_inode (cur->dir_table[fd]));
+        else if (cur->fd_table[fd] != NULL)
+          f->eax = (int) inode_get_inumber (file_get_inode (cur->fd_table[fd]));
+        else
+          f->eax = -1;
+        break;
+      }
+#endif /* FILESYS */
 
     default:
       exit_with_status (-1);
@@ -485,14 +617,28 @@ sys_munmap (mapid_t mapid)
 }
 #endif /* VM */
 
-/* Returns the struct file* for fd, or NULL if fd is invalid. */
+/* Returns the struct file* for fd, or NULL if fd is invalid or a directory. */
 static struct file *
 get_file_from_fd (int fd)
 {
   if (fd < 2 || fd >= MAX_FDS)
     return NULL;
+#ifdef FILESYS
+  if (thread_current ()->dir_table[fd] != NULL)
+    return NULL;
+#endif
   return thread_current ()->fd_table[fd];
 }
+
+#ifdef FILESYS
+static struct dir *
+get_dir_from_fd (int fd)
+{
+  if (fd < 2 || fd >= MAX_FDS)
+    return NULL;
+  return thread_current ()->dir_table[fd];
+}
+#endif
 
 /* Terminates the process if any byte of the string is in kernel space
    or unmapped user memory. */

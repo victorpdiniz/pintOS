@@ -11,6 +11,7 @@
 #include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/inode.h"
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
@@ -30,6 +31,9 @@ struct start_args
   {
     char *cmd_line;              /* palloc'd copy of the command line */
     struct child_process *cp;    /* parent-owned child_process entry */
+#ifdef FILESYS
+    block_sector_t cwd_sector;   /* parent's working directory */
+#endif
   };
 
 static thread_func start_process NO_RETURN;
@@ -92,6 +96,9 @@ process_execute (const char *cmd_line)
     }
   args->cmd_line = cmd_copy;
   args->cp = cp;
+#ifdef FILESYS
+  args->cwd_sector = thread_current ()->cwd_sector;
+#endif
 
   tid = thread_create (file_name, PRI_DEFAULT, start_process, args);
   if (tid == TID_ERROR)
@@ -125,7 +132,14 @@ start_process (void *args_)
   struct start_args *args = args_;
   char *file_name = args->cmd_line;
   struct child_process *cp = args->cp;
+#ifdef FILESYS
+  block_sector_t parent_cwd = args->cwd_sector;
+#endif
   free (args);
+
+#ifdef FILESYS
+  cur->cwd_sector = (parent_cwd != 0) ? parent_cwd : ROOT_DIR_SECTOR;
+#endif
 
   cur->cp = cp;
 
@@ -258,7 +272,7 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
-  /* Close all open file descriptors. */
+  /* Close all open file descriptors and directory fds. */
   lock_acquire (&filesys_lock);
   for (int i = 2; i < MAX_FDS; i++)
     {
@@ -267,6 +281,13 @@ process_exit (void)
           file_close (cur->fd_table[i]);
           cur->fd_table[i] = NULL;
         }
+#ifdef FILESYS
+      if (cur->dir_table[i] != NULL)
+        {
+          dir_close (cur->dir_table[i]);
+          cur->dir_table[i] = NULL;
+        }
+#endif
     }
   /* Re-allow writes to and close the executable. */
   if (cur->executable != NULL)

@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/synch.h"
+#include "devices/block.h"
 #ifdef VM
 #include <hash.h>
 #endif
@@ -12,6 +13,7 @@
 #define MAX_FDS 128
 
 struct file;  /* forward declaration to avoid including filesys/file.h */
+struct dir;   /* forward declaration for open directory fds */
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -132,6 +134,11 @@ struct thread
     struct list mmap_list;              /* Active mmap regions. */
     int next_mapid;                     /* Next mmap ID to assign. */
     void *esp_saved;                    /* User ESP saved at syscall entry. */
+#endif
+
+#ifdef FILESYS
+    block_sector_t cwd_sector;          /* Current working directory inode sector. */
+    struct dir *dir_table[MAX_FDS];     /* Open directory file descriptors. */
 #endif
 
     /* Owned by thread.c. */
